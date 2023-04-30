@@ -11,6 +11,8 @@ learning_rate = 6e-3
 eval_iters = 20
 n_embed = 256
 n_layer = 2
+dropout = 0.2
+rnn_type='LSTM'
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 #torch.manual_seed(42)
@@ -59,15 +61,21 @@ def estimate_loss():
     model.train()
     return out
 
-class simpleRNN(nn.Module):
-    def __init__(self, n_embed, n_hidden, n_layer, tie_weights=True):
+class charRNN(nn.Module):
+    def __init__(self, n_embed, n_hidden, n_layer, dropout=0.5, rnn_type='GRU', tie_weights=True):
         super().__init__()
+        self.rnn_type = rnn_type
         self.n_embed = n_embed
         self.n_hidden = n_hidden
         self.n_layer = n_layer
 
+        self.dropout = nn.Dropout(dropout)
+
         self.encoder = nn.Embedding(vocab_size, n_embed)
-        self.rnn = nn.RNN(n_embed, n_hidden, n_layer, batch_first=True)
+        if rnn_type in ['LSTM', 'GRU']:
+            self.rnn = getattr(nn, rnn_type)(n_embed, n_hidden, n_layer, dropout=dropout, batch_first=True)
+        else:
+            self.rnn = nn.RNN(n_embed, n_hidden, n_layer, nonlinearity=rnn_type, batch_first=True)
         self.decoder = nn.Linear(n_hidden, vocab_size)
         
         if tie_weights:
@@ -76,11 +84,10 @@ class simpleRNN(nn.Module):
             self.decoder.weight = self.encoder.weight
     
     def forward(self, idx, hx, targets=None):
-        B, T = idx.shape
-        # idx and targets are both (B,T) tensor of integers
-        tok_emb = self.encoder(idx) # (B, T, C)
-        y, h = self.rnn(tok_emb, hx) # (B, T, C)
-        logits = self.decoder(y) # (B, T, vocab_size)
+        tok_emb = self.dropout(self.encoder(idx))
+        y, h = self.rnn(tok_emb, hx)
+        y = self.dropout(y)
+        logits = self.decoder(y)
         
         if targets is None:
             loss = None
@@ -93,8 +100,12 @@ class simpleRNN(nn.Module):
         return logits, h, loss
     
     def init_hidden(self, batch_size):
-        # first hidden state is all zeros
-        return torch.zeros(self.n_layer, batch_size, self.n_hidden).to(device)
+        h0 = torch.zeros(self.n_layer, batch_size, self.n_hidden).to(device)
+        if self.rnn_type == 'LSTM':
+            c0 = torch.zeros(self.n_layer, batch_size, self.n_hidden).to(device)
+            return (h0, c0)
+        else:
+            return h0
     
     @torch.no_grad()
     def generate(self, idx, max_new_tokens):
@@ -114,7 +125,7 @@ class simpleRNN(nn.Module):
             idx = torch.cat((idx, idx_next), dim=1) # (B, T+1)
         return idx
 
-model = simpleRNN(n_embed, n_embed, n_layer).to(device)
+model = charRNN(n_embed, n_embed, n_layer, rnn_type=rnn_type).to(device)
 
 optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
 
